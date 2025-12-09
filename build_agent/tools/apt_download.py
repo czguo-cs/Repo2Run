@@ -19,9 +19,9 @@ import warnings
 import sys
 warnings.simplefilter('ignore', FutureWarning)
 
-def update_apt(sudo=False):
+def update_apt():
     try:
-        update_command = f'{"sudo " if sudo else ""}apt-get update'
+        update_command = 'apt-get update'
         result = subprocess.run(update_command, shell=True, check=True, text=True, capture_output=True)
         print("Apt-get Update Ouput:\n", result.stdout)
         if result.stderr:
@@ -34,17 +34,16 @@ def update_apt(sudo=False):
         print("Please try again!")
         return False, e
 
-# version_constraints如果要有，必须是'=[version]'，如"=1.0"
-# 测试用，sudo一般不设置，因为默认在docker中为root
-def run_apt(package_name, version_constraints, sudo=False):
-    success, result = update_apt(sudo)
+# version_constraints如果要有,必须是'=[version]'，如"=1.0"
+def run_apt(package_name, version_constraints):
+    success, result = update_apt()
     if not success:
         return False, result
     if not version_constraints or len(version_constraints.strip()) == 0:
         full_name = package_name
     else:
         full_name = package_name + version_constraints
-    apt_command = f'{"sudo " if sudo else ""}apt-get install -y ' + full_name
+    apt_command = f'apt-get install -y ' + full_name
     print(f"Extract command `{apt_command}`, about to execute...")
     try:
         # 执行apt-get指令

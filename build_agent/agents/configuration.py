@@ -69,7 +69,7 @@ Explanation: Clear all the items in the conflict list.''',
     return new_text
 
 class Configuration(Agent):
-    def __init__(self, sandbox, image_name, full_name, root_dir, llm="gpt-4o-2024-05-13", max_turn=70):
+    def __init__(self, sandbox, image_name, full_name, root_dir, llm="gpt-4o-2024-05-13", max_turn=70, instance_id=None, output_dir="default"):
         self.model = llm
         # self.model = "aws_claude35_sonnet"
         self.root_dir = root_dir
@@ -77,6 +77,8 @@ class Configuration(Agent):
         self.sandbox = sandbox
         self.sandbox_session = self.sandbox.get_session()
         self.full_name = full_name
+        self.instance_id = instance_id if instance_id else full_name  # 使用 instance_id，如果没有则回退到 full_name
+        self.output_dir = output_dir  # 添加 output_dir 参数
         self.tool_lib = [
             Tools.waiting_list_add,
             Tools.waiting_list_add_file,
@@ -221,6 +223,9 @@ VERY IMPORTANT TIPS:
     * You are not allowed to use commands like `hatch shell` that would open a new shell!!!
     * You are not allowed to use commands like `hatch shell` that would open a new shell!!!
     * You are not allowed to use commands like `hatch shell` that would open a new shell!!!
+    * Do not use sudo command! You are already running as root in the Docker container!!!
+    * Do not use sudo command! You are already running as root in the Docker container!!!
+    * Do not use sudo command! You are already running as root in the Docker container!!!
 """
     def show_init_prompt(self):
         print(self.init_prompt)
@@ -233,19 +238,22 @@ VERY IMPORTANT TIPS:
         print(self.init_prompt)
         start_time0 = time.time()
         self.messages = []
-        if "gpt" in self.model:
+        if "claude" in self.model:
+            # Claude uses combined prompt format
+            combined_prompt = f"{self.init_prompt} \n[Project root Path]: /repo"
+            user_message = {"role": "user", "content": combined_prompt}
+            self.messages.append(user_message)
+        else:
+            # GPT, kimi, and other models use system message + user message format
             system_message = {"role": "system", "content": self.init_prompt}
             self.messages.append(system_message)
             user_message = {"role": "user", "content": f"[Project root Path]: /repo"}
             self.messages.append(user_message)
-        else:
-            assert "claude" in self.model
-            claude_prompt = f"{self.init_prompt} \n[Project root Path]: /repo"
-            user_message = {"role": "user", "content": claude_prompt}
-            self.messages.append(user_message)
 
         turn = 0
         cost_tokens = 0
+        total_input_tokens = 0
+        total_output_tokens = 0
         diff_no = 1
         def manage_token_usage(messages, max_tokens=150000):
             """
@@ -307,7 +315,12 @@ VERY IMPORTANT TIPS:
             GPT_elasped_time = GPT_end_time - GPT_start_time
             self.outer_commands.append({"GPT_time": GPT_elasped_time})
             configuration_agent = configuration_agent_list[0]
-            cost_tokens += usage["total_tokens"]
+
+            # Accumulate token usage
+            if usage:
+                cost_tokens += usage["total_tokens"]
+                total_input_tokens += usage["prompt_tokens"]
+                total_output_tokens += usage["completion_tokens"]
 
             # 将模型回答加入记忆
             assistant_message = {"role": "assistant", "content": configuration_agent}
@@ -328,10 +341,16 @@ VERY IMPORTANT TIPS:
                     self.outer_commands.append({"command": commands[i], "returncode": -2, "time": -1})
                     start_time = time.time()
                     vdb = subprocess.run("df -h | grep '/dev/vdb' | awk '{print $5}'", shell=True, capture_output=True, text=True)
-                    if float(vdb.stdout.strip().split('%')[0]) > 90:
-                        print('Warning! The disk /dev/vdb has occupied over 90% memories!')
-                        sys.exit(3)
-                    
+                    disk_usage = vdb.stdout.strip()
+                    if disk_usage and '%' in disk_usage:
+                        try:
+                            usage_percent = float(disk_usage.split('%')[0])
+                            if usage_percent > 90:
+                                print('Warning! The disk /dev/vdb has occupied over 90% memories!')
+                                sys.exit(3)
+                        except ValueError as e:
+                            print(f'Warning: Could not parse disk usage: {disk_usage}')
+
                     # 切换python版本
                     if commands[i].strip().startswith('change_python_version'):
                         python_version = commands[i].strip().split('change_python_version')[1].strip()
@@ -455,22 +474,33 @@ VERY IMPORTANT TIPS:
                             pip_list_return_code = -1
 
                         if len(generate_diff.strip()) > 0 and generate_diff_return_code == 0:
-                            if not os.path.exists(f'{self.root_dir}/output/{self.full_name}/patch'):
-                                os.system(f'mkdir {self.root_dir}/output/{self.full_name}/patch')
-                            with open(f'{self.root_dir}/output/{self.full_name}/patch/final_patch.diff', 'w') as w0:
+                            if not os.path.exists(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/patch'):
+                                os.system(f'mkdir -p {self.root_dir}/output/{self.output_dir}/{self.instance_id}/patch')
+                            with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/patch/final_patch.diff', 'w') as w0:
                                 w0.write(generate_diff)
                         if pipdeptree_json_return_code == 0:
-                            with open(f'{self.root_dir}/output/{self.full_name}/pipdeptree.json', 'w') as w1:
+                            with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/pipdeptree.json', 'w') as w1:
                                 w1.write(pipdeptree_json)
                         if pipdeptree_normal_return_code == 0:
-                            with open(f'{self.root_dir}/output/{self.full_name}/pipdeptree.txt', 'w') as w2:
+                            with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/pipdeptree.txt', 'w') as w2:
                                 w2.write(pipdeptree_normal)
-                        if pip_list_return_code == 0:
-                            with open(f'{self.root_dir}/output/{self.full_name}/pip_list.json', 'w') as w2:
-                                w2.write(json.dumps(json.loads(pip_list), indent=4))
+                        if pip_list_return_code == 0 and pip_list and pip_list.strip():
+                            try:
+                                # 验证是否为有效的JSON
+                                parsed_json = json.loads(pip_list)
+                                with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/pip_list.json', 'w') as w2:
+                                    w2.write(json.dumps(parsed_json, indent=4))
+                            except (json.JSONDecodeError, ValueError) as e:
+                                print(f"Warning: Failed to parse pip list output as JSON: {e}")
+                                print(f"pip_list length: {len(pip_list)}")
+                                print(f"pip_list first 500 chars: {pip_list[:500]}")
+                                print(f"pip_list last 200 chars: {pip_list[-200:]}")
+                                # 保存原始输出以便调试
+                                with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/pip_list_raw.txt', 'w') as w2:
+                                    w2.write(pip_list)
 
                         print(sandbox_res)
-                        with open(f'{self.root_dir}/output/{self.full_name}/test.txt', 'w') as w3:
+                        with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/test.txt', 'w') as w3:
                             w3.write('\n'.join(sandbox_res.splitlines()[1:]))
                         finish = True
                         break
@@ -495,9 +525,9 @@ VERY IMPORTANT TIPS:
                         except Exception as e:
                             print(f'Generate diff wrong: {e}!')
                         # if len(generate_diff.strip()) > 0 and generate_diff_return_code == 0:
-                        if not os.path.exists(f'{self.root_dir}/output/{self.full_name}/patch'):
-                            os.system(f'mkdir {self.root_dir}/output/{self.full_name}/patch')
-                        with open(f'{self.root_dir}/output/{self.full_name}/patch/patch_{diff_no}.diff', 'w') as w0:
+                        if not os.path.exists(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/patch'):
+                            os.system(f'mkdir -p {self.root_dir}/output/{self.output_dir}/{self.instance_id}/patch')
+                        with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/patch/patch_{diff_no}.diff', 'w') as w0:
                             w0.write(generate_diff + '\n')
                         diff_no += 1
                     system_res += sandbox_res
@@ -550,9 +580,9 @@ The edit format is as follows:
             else:
                 system_message = {"role": "user", "content": system_res}
             self.messages.append(system_message)
-            with open(f'{self.root_dir}/output/{self.full_name}/outer_commands.json', 'w') as w1:
+            with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/outer_commands.json', 'w') as w1:
                 w1.write(json.dumps(self.outer_commands, indent=4))
-            with open(f'{self.root_dir}/output/{self.full_name}/inner_commands.json', 'w') as w1:
+            with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/inner_commands.json', 'w') as w1:
                 w1.write(json.dumps(self.sandbox.commands, indent=4))
             print(system_res)
 
@@ -574,23 +604,40 @@ The edit format is as follows:
                 pip_list_return_code = -1
 
             if len(generate_diff.strip()) > 0 and generate_diff_return_code == 0:
-                if not os.path.exists(f'{self.root_dir}/output/{self.full_name}/patch'):
-                    os.system(f'mkdir {self.root_dir}/output/{self.full_name}/patch')
-                with open(f'{self.root_dir}/output/{self.full_name}/patch/final_patch.diff', 'w') as w0:
+                if not os.path.exists(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/patch'):
+                    os.system(f'mkdir -p {self.root_dir}/output/{self.output_dir}/{self.instance_id}/patch')
+                with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/patch/final_patch.diff', 'w') as w0:
                     w0.write(generate_diff)
             if pipdeptree_json_return_code == 0:
-                with open(f'{self.root_dir}/output/{self.full_name}/pipdeptree.json', 'w') as w1:
+                with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/pipdeptree.json', 'w') as w1:
                     w1.write(pipdeptree_json)
             if pipdeptree_normal_return_code == 0:
-                with open(f'{self.root_dir}/output/{self.full_name}/pipdeptree.txt', 'w') as w2:
+                with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/pipdeptree.txt', 'w') as w2:
                     w2.write(pipdeptree_normal)
-            if pip_list_return_code == 0:
-                with open(f'{self.root_dir}/output/{self.full_name}/pip_list.json', 'w') as w2:
-                    w2.write(json.dumps(json.loads(pip_list), indent=4))
+            if pip_list_return_code == 0 and pip_list and pip_list.strip():
+                try:
+                    # 验证是否为有效的JSON
+                    parsed_json = json.loads(pip_list)
+                    with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/pip_list.json', 'w') as w2:
+                        w2.write(json.dumps(parsed_json, indent=4))
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"Warning: Failed to parse pip list output as JSON: {e}")
+                    print(f"pip_list length: {len(pip_list)}")
+                    print(f"pip_list first 500 chars: {pip_list[:500]}")
+                    print(f"pip_list last 200 chars: {pip_list[-200:]}")
+                    # 保存原始输出以便调试
+                    with open(f'{self.root_dir}/output/{self.output_dir}/{self.instance_id}/pip_list_raw.txt', 'w') as w2:
+                        w2.write(pip_list)
         
         append_trajectory(trajectory, self.messages, 'configuration')
         end_time0 = time.time()
         cost_time = end_time0 - start_time0
-        trajectory.append({'agent': "configuration", 'cost_time': cost_time, 'cost_tokens': cost_tokens}) 
+        trajectory.append({
+            'agent': "configuration",
+            'cost_time': cost_time,
+            'cost_tokens': cost_tokens,
+            'total_input_tokens': total_input_tokens,
+            'total_output_tokens': total_output_tokens
+        }) 
         self.sandbox_session.close()
         return trajectory, self.outer_commands

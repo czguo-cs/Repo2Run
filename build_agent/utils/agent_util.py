@@ -188,13 +188,22 @@ def extract_diffs(text):
     return diffs
 
 def save_diff_description(text):
-    temp_dir = "/tmp/patch"
+    # Use user-specific temp directory to avoid permission conflicts
+    import getpass
+    username = getpass.getuser()
+    temp_dir = f"/tmp/patch_{username}"
     os.makedirs(temp_dir, exist_ok=True)
-    cmd = f"sudo chmod -R 777 {temp_dir}"
-    subprocess.run(cmd, check=True, shell=True)
+    # Try to set permissions, but don't fail if it doesn't work
+    try:
+        os.chmod(temp_dir, 0o777)
+    except PermissionError:
+        pass  # Continue if we can't change permissions
     with tempfile.NamedTemporaryFile(mode='w+', dir=temp_dir, delete=False) as temp_file:
         temp_file_path = temp_file.name
-        os.chmod(temp_file_path, 0o777)
+        try:
+            os.chmod(temp_file_path, 0o777)
+        except PermissionError:
+            pass  # Continue if we can't change permissions
         temp_file.write(text)
     return temp_file_path
 

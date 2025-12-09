@@ -99,18 +99,28 @@ def compare_versions(version1, version2):
     return 0
 
 class Sandbox:
-    def __init__(self, namespace, repo_full_name, root_path):
+    def __init__(self, namespace, repo_full_name, root_path, instance_id, output_dir="default"):
         self.namespace = namespace
-        self.client = docker.from_env(timeout=600)
+        self.client = docker.from_env(timeout=10800)  # 3 hours
         self.container = None
         self.shell = None
         self.commands = list()
         self.full_name = repo_full_name
         self.root_path = root_path
+        self.instance_id = instance_id
+        self.output_dir = output_dir
+        # Use user-specific temp directory to avoid permission conflicts
+        import getpass
+        username = getpass.getuser()
+        self.patch_dir = f'/tmp/patch_{username}'
     
     def generate_dockerfile(self):
         if not self.namespace.lower().strip().split(':')[0] == 'python':
             dockerfile_content = f"""FROM {self.namespace}
+ENV http_proxy="http://iJbVyX:mJ8eR9tU6%5Bs@10.251.112.51:8799"
+ENV https_proxy="http://iJbVyX:mJ8eR9tU6%5Bs@10.251.112.51:8799"
+ENV no_proxy="localhost,127.0.0.1,::1,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12,*.lan,.baidu.com,.baidu-int.com,baidu.com,baidu-int.com"
+ENV NO_PROXY="$no_proxy"
 
 RUN mkdir -p ~/.pip && touch ~/.pip/pip.conf
 RUN echo "[global]" >> ~/.pip/pip.conf && echo "[install]" >> ~/.pip/pip.conf
@@ -120,6 +130,11 @@ RUN echo "[global]" >> ~/.pip/pip.conf && echo "[install]" >> ~/.pip/pip.conf
         elif compare_versions(self.namespace.lower().strip().split(':')[1].strip(), '3.8') >= 0:
             # poetry必须要python3.8及以上
             dockerfile_content = f"""FROM {self.namespace}
+ENV http_proxy="http://iJbVyX:mJ8eR9tU6%5Bs@10.251.112.51:8799"
+ENV https_proxy="http://iJbVyX:mJ8eR9tU6%5Bs@10.251.112.51:8799"
+ENV no_proxy="localhost,127.0.0.1,::1,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12,*.lan,.baidu.com,.baidu-int.com,baidu.com,baidu-int.com"
+ENV NO_PROXY="$no_proxy"
+
 RUN mkdir -p ~/.pip && touch ~/.pip/pip.conf
 RUN echo "[global]" >> ~/.pip/pip.conf && echo "[install]" >> ~/.pip/pip.conf
 
@@ -139,6 +154,10 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
         """
         else:
             dockerfile_content = f"""FROM {self.namespace}
+ENV http_proxy="http://iJbVyX:mJ8eR9tU6%5Bs@10.251.112.51:8799"
+ENV https_proxy="http://iJbVyX:mJ8eR9tU6%5Bs@10.251.112.51:8799"
+ENV no_proxy="localhost,127.0.0.1,::1,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12,*.lan,.baidu.com,.baidu-int.com,baidu.com,baidu-int.com"
+ENV NO_PROXY="$no_proxy"
 
 
 RUN mkdir -p ~/.pip && touch ~/.pip/pip.conf
@@ -153,10 +172,10 @@ RUN pip install pipdeptree
 
 RUN mkdir -p /repo && git config --global --add safe.directory /repo
         """
-        dockerfile_path = f'{self.root_path}/utils/repo/{self.full_name}/Dockerfile'
+        dockerfile_path = f'{self.root_path}/utils/repo/{self.instance_id}/Dockerfile'
         with open(dockerfile_path, "w") as f:
             f.write(dockerfile_content)
-        return f'{self.root_path}/utils/repo/{self.full_name}'
+        return f'{self.root_path}/utils/repo/{self.instance_id}'
     
     def build_image(self):
         dockerfile_path = self.generate_dockerfile()
@@ -200,8 +219,9 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
     def commit_container(self):
         try:
             delete_dangling_image()
-            # 将容器提交成固定名称的镜像
-            image = self.container.commit(repository=f"{self.full_name.lower().replace('/', '_').replace('-', '_')}", tag='tmp')
+            # 将容器提交成固定名称的镜像，使用 instance_id 作为镜像名
+            image_name = self.instance_id.lower().replace('/', '_').replace('-', '_')
+            image = self.container.commit(repository=f"{image_name}", tag='tmp')
             # subprocess.run(f'docker commit {self.container.name} running_env:tmp', shell=True)
             # print(f"Container {self.container.name} committed as image running_env:tmp.")
             return True
@@ -212,7 +232,8 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
     def switch_to_pre_image(self):
         try:
             # tmp_image_name = "running_env:tmp"
-            tmp_image_name = f"{self.full_name.lower().replace('/', '_').replace('-', '_')}:tmp"
+            image_name = self.instance_id.lower().replace('/', '_').replace('-', '_')
+            tmp_image_name = f"{image_name}:tmp"
             # print(f"Switching to tmp image: {tmp_image_name}")
 
             # 停止并移除现有的容器
@@ -220,8 +241,8 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
                 self.container.stop()
                 self.container.remove()
                 delete_dangling_image()
-            
-            host_path = '/tmp/patch'
+
+            host_path = self.patch_dir
             container_path = '/tmp/patch'
             # 创建并启动一个新的容器，使用 tmp 镜像
             self.container = self.client.containers.run(
@@ -263,29 +284,30 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
                 # sys.exit(1)
                 raise Exception('Build image error!')
         image = f"{self.namespace}"
-        host_path = '/tmp/patch'
+        host_path = self.patch_dir
         container_path = '/tmp/patch'
         try:
             self.container = self.client.containers.run(
-                image, 
-                detach=True, 
-                tty=True, 
-                stdin_open=True, 
+                image,
+                detach=True,
+                tty=True,
+                stdin_open=True,
                 privileged=True,
                 volumes={host_path: {'bind': container_path, 'mode': 'rw'}}
                 )
 
             print(f"Container {self.container.name} {self.container.short_id} started with image {image}")
-            
+
             current_file_path = os.path.abspath(__file__)
             current_directory = os.path.dirname(current_file_path)
             project_directory = os.path.dirname(current_directory)
-            
+
             cmd = f"chmod -R 777 {project_directory}/tools && docker cp {project_directory}/tools {self.container.name}:/home"
             subprocess.run(cmd, check=True, shell=True)
 
-            # 把utils/repo中的内容复制到根目录/中
-            cmd = f"docker cp {project_directory}/utils/repo/{self.full_name}/repo {self.container.name}:/"
+            # 把utils/repo中的内容复制到根目录/中，使用 root_path 和 instance_id
+            repo_source_path = f"{self.root_path}/utils/repo/{self.instance_id}/repo"
+            cmd = f"docker cp {repo_source_path} {self.container.name}:/"
             subprocess.run(cmd, check=True, shell=True)
             return 1
         except Exception as e:
@@ -299,7 +321,7 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
                 self.shell.close(force=True)  # 确保关闭之前的shell
             command = f'docker exec -it {self.container.id} /bin/bash'
             self.shell = pexpect.spawn(command)
-            self.shell.expect([r'\$ ', r'# '], timeout=600)  # 等待bash提示符
+            self.shell.expect([r'\$ ', r'# '], timeout=10800)  # 等待bash提示符，3 hours
         else:
             raise Exception("Container not started. Call start_container() first.")
 
@@ -316,7 +338,7 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
             def get_returncode(self):
                 echo_returncode = '''echo $?'''
                 self.sandbox.shell.sendline(echo_returncode)
-                self.sandbox.shell.expect([r'root@.*:.*# '], timeout=600)
+                self.sandbox.shell.expect([r'root@.*:.*# '], timeout=10800)  # 3 hours
                 # 获取 shell.before 中匹配到的模式之前的输出
                 output = self.sandbox.shell.before.decode('utf-8').strip()
                 output = output.replace('\x1b[?2004l\r', '')
@@ -335,7 +357,7 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
 
 
             # 给download用的一个特殊函数
-            def execute_simple(self, command, timeout=600):
+            def execute_simple(self, command, timeout=10800):  # 3 hours
                 self.sandbox.commit_container()
                 if command[-1] != '&':
                     start_time = time.time()
@@ -348,7 +370,7 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
                     self.sandbox.shell.sendline(command)
                     self.sandbox.commands[-1]["returncode"] = -1
 
-                self.sandbox.shell.expect([r'root@.*:.*# '], timeout=600)  # 等待bash提示符，带超时
+                self.sandbox.shell.expect([r'root@.*:.*# '], timeout=10800)  # 等待bash提示符，3 hours
                 end_time = time.time()
                 elasped_time = end_time - start_time
                 self.sandbox.commands[-1]["time"] = elasped_time
@@ -378,7 +400,7 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
                     self.sandbox.switch_to_pre_image()
                     return False, res
 
-            def execute(self, command, waiting_list, conflict_list, timeout=600):
+            def execute(self, command, waiting_list, conflict_list, timeout=10800):  # 3 hours
                 try:
                     if 'hatch shell' == command.lower().strip():
                         return 'You are not allowed to use commands like `hatch shell` that would open a new shell!!!', -1
@@ -386,7 +408,7 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
                     if '$pwd$' == command.lower().strip():
                         command = 'pwd'
                         self.sandbox.shell.sendline(command)
-                        self.sandbox.shell.expect([r'root@.*:.*# '], timeout=600)  # 等待bash提示符，带超时
+                        self.sandbox.shell.expect([r'root@.*:.*# '], timeout=10800)  # 等待bash提示符，3 hours
                         # 获取 shell.before 中匹配到的模式之前的输出
                         output = self.sandbox.shell.before.decode('utf-8').strip()
                         output = output.replace('\x1b[?2004l\r', '')
@@ -405,11 +427,11 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
                     if '$pip list --format json$' == command.lower().strip():
                         command = 'pip list --format json'
                         self.sandbox.shell.sendline(command)
-                        self.sandbox.shell.expect([r'root@.*:.*# '], timeout=600)  # 等待bash提示符，带超时
+                        self.sandbox.shell.expect([r'root@.*:.*# '], timeout=10800)  # 等待bash提示符，3 hours
                         # 获取 shell.before 中匹配到的模式之前的输出
                         output = self.sandbox.shell.before.decode('utf-8').strip()
                         output = output.replace('\x1b[?2004l\r', '')
-                        
+
                         # 分析输出行，排除发送的命令行和最后的提示符行
                         output_lines = output.split('\r\n')
 
@@ -419,7 +441,8 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
                             id = last_line.find('''\x1b[''')
                             if id != -1 and len(last_line[:id].strip()) > 0:
                                 output_lines.append(last_line[:id].strip())
-                        return output_lines[0], 0
+                        # 返回完整的JSON输出（所有行拼接）
+                        return '\n'.join(output_lines), 0
 
                     if match_download(command):
                         with OutputCollector() as collector:
@@ -448,17 +471,17 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
                         return truncate_msg(result_message, command), 'unknown'
                     elif match_waitinglist_addfile(command) != -1:
                         file_path = match_waitinglist_addfile(command)['file_path']
-                        current_file_path = os.path.abspath(__file__)
-                        current_directory = os.path.dirname(current_file_path)
-                        project_directory = os.path.dirname(current_directory)
-                        result = subprocess.run(f'docker cp {self.sandbox.container.name}:{file_path} {project_directory}/utils/repo/{self.sandbox.full_name}/repo', shell=True, capture_output=True)
+                        # Use root_path and instance_id for correct path
+                        target_repo_path = f'{self.sandbox.root_path}/utils/repo/{self.sandbox.instance_id}/repo'
+                        result = subprocess.run(f'docker cp {self.sandbox.container.name}:{file_path} {target_repo_path}', shell=True, capture_output=True)
                         if result.returncode != 0:
                             msg = f'\nRunning `{command}`...\n'
                             msg += f'The file {file_path} does not exist. Please ensure you have entered the correct absolute path, not a relative path! If you are unsure, you can use commands like `ls` to verify.'
                             return msg, 1
-                        subprocess.run(f'sudo chown huruida:huruida {project_directory}/repo/{self.sandbox.full_name}/repo/{file_path.split("/")[-1]}', shell=True, capture_output=True)
+                        # Note: chown command may need adjustment based on your user
+                        # subprocess.run(f'sudo chown huruida:huruida {target_repo_path}/{file_path.split("/")[-1]}', shell=True, capture_output=True)
                         with OutputCollector() as collector:
-                            waiting_list.addfile(f'{project_directory}/utils/repo/{self.sandbox.full_name}/repo/{file_path.split("/")[-1]}', conflict_list)
+                            waiting_list.addfile(f'{target_repo_path}/{file_path.split("/")[-1]}', conflict_list)
                         result_message = f'Running `{command}`...\n' + collector.get_output() + '\n'
                         return truncate_msg(result_message, command), 'unknown'
                     elif match_waitinglist_clear(command):
@@ -514,7 +537,7 @@ RUN mkdir -p /repo && git config --global --add safe.directory /repo
                             self.sandbox.shell.sendline(command)
                             self.sandbox.commands[-1]["returncode"] = -1
 
-                        self.sandbox.shell.expect([r'root@.*:.*# '], timeout=600*2)  # 等待bash提示符，带超时
+                        self.sandbox.shell.expect([r'root@.*:.*# '], timeout=10800)  # 等待bash提示符，3 hours
                         end_time = time.time()
                         elasped_time = end_time - start_time
                         self.sandbox.commands[-1]["time"] = elasped_time
@@ -587,7 +610,7 @@ Explanation: Clear all the items in the waiting list.'''
                 
                 except pexpect.TIMEOUT:
                     if match_runtest(command) or match_poetryruntest(command):
-                        os.sytem(f'touch {self.sandbox.root_path}/output/{self.sandbox.full_name}/TIMEOUT')
+                        os.system(f'touch {self.sandbox.root_path}/output/{self.sandbox.output_dir}/{self.sandbox.instance_id}/TIMEOUT')
                         sys.exit(123)
                     partial_output = self.sandbox.shell.before.decode('utf-8').strip()
                     partial_output_lines = partial_output.split('\n')
@@ -596,7 +619,7 @@ Explanation: Clear all the items in the waiting list.'''
                     partial_output = '\n'.join(partial_output_lines)
                     return f"Error: Command '{command}' timed out after {timeout} seconds. Partial output:\n + {partial_output}", 1
 
-            def edit(self, edit_tmp_file:str, project_path:str, file_path = None, start_line = 0, end_line = 0, timeout=600):
+            def edit(self, edit_tmp_file:str, project_path:str, file_path = None, start_line = 0, end_line = 0, timeout=10800):  # 3 hours
                 if file_path:
                     if file_path.split('/')[-1].startswith('test_') or file_path('/')[-1].endswith('_test.py'):
                         msg = f'Running Edit...\n' + f'You are trying to modify file {file_path}, but we require that you should not modify the testing files. Please consider alternative solutions.' + '\n'
@@ -653,7 +676,33 @@ Explanation: Clear all the items in the waiting list.'''
             self.container.remove()
             print(f"Container {self.container.short_id} stopped and removed")
             self.container = None
-            subprocess.run(f"docker rmi {self.full_name.lower().replace('/', '_').replace('-', '_')}:tmp > /dev/null 2>&1", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            # 删除临时镜像，使用 instance_id
+            image_name = self.instance_id.lower().replace('/', '_').replace('-', '_')
+            # 删除带tmp标签的镜像
+            subprocess.run(f"docker rmi {image_name}:tmp > /dev/null 2>&1", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            # 清理悬空镜像（由频繁commit产生的无标签镜像）
+            print("Cleaning up dangling images...")
+            delete_dangling_image()
+
+            # 额外清理：删除所有与此instance相关的tmp镜像（如果有多个）
+            try:
+                result = subprocess.run(
+                    f"docker images {image_name} --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep tmp",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                if result.stdout.strip():
+                    for img in result.stdout.strip().split('\n'):
+                        if img and 'tmp' in img:
+                            subprocess.run(f"docker rmi {img} > /dev/null 2>&1", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            print(f"Removed tmp image: {img}")
+            except Exception as e:
+                print(f"Warning: Failed to clean up some tmp images: {e}")
+
         return self.commands
 
 
@@ -662,7 +711,7 @@ if __name__ == "__main__":
     from waiting_list import WaitingList
     waiting_list = WaitingList()
     conflict_list = ConflictList()
-    sandbox = Sandbox("python:3.10", "basf/MolPipeline")
+    sandbox = Sandbox("python:3.10", "basf/MolPipeline", "/tmp", "test_instance", "default")
     sandbox.start_container()
     session = sandbox.get_session()
     while True:

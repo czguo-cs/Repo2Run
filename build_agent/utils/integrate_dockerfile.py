@@ -267,16 +267,24 @@ def generate_statement(inner_command, pipdeptree_data):
         return f'RUN {command}'
 
 # root_path must be absolute path
-def integrate_dockerfile(root_path):
+def integrate_dockerfile(root_path, full_name):
     dockerfile = list()
     root_path = os.path.normpath(root_path)
-    author_name = root_path.split('/')[-2]
-    repo_name = root_path.split('/')[-1]
+    # Extract author_name and repo_name from full_name instead of path
+    # root_path is now {output_dir}/{instance_id}, not {output_dir}/{author_name}/{repo_name}
+    author_name = full_name.split('/')[0]
+    repo_name = full_name.split('/')[1]
     base_image_st = 'FROM python:3.10'
+    proxy_config = [
+        'ENV http_proxy="http://iJbVyX:mJ8eR9tU6%5Bs@10.251.112.51:8799"',
+        'ENV https_proxy="http://iJbVyX:mJ8eR9tU6%5Bs@10.251.112.51:8799"',
+        'ENV no_proxy="localhost,127.0.0.1,::1,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12,*.lan,.baidu.com,.baidu-int.com,baidu.com,baidu-int.com"',
+        'ENV NO_PROXY="$no_proxy"'
+    ]
     workdir_st = f'WORKDIR /'
     # 将patch文件夹移到根目录下，为/patch
 
-    copy_st = f'COPY search_patch /search_patch'
+    copy_st = f'COPY patch /patch'
     copy_edit_st = f'COPY code_edit.py /code_edit.py'
     pre_download = 'RUN apt-get update && apt-get install -y curl\nRUN curl -sSL https://install.python-poetry.org | python -\nENV PATH="/root/.local/bin:$PATH"\nRUN pip install pytest pytest-xdist\nRUN pip install pipdeptree'
 
@@ -287,7 +295,7 @@ def integrate_dockerfile(root_path):
     rm_st = f'RUN rm -rf /{repo_name}'
     with open(f'{root_path}/sha.txt', 'r') as r1:
         sha = r1.read().strip()
-    checkout_st = f'RUN cd /repo && git checkout {sha}'
+    checkout_st = f'RUN cd /repo && git reset --hard {sha}'
     container_run_set = list()
     if not (os.path.exists(f'{root_path}/inner_commands.json')):
         subprocess.run('touch ERROR', cwd=root_path, shell=True)
@@ -295,6 +303,14 @@ def integrate_dockerfile(root_path):
         commands_data = json.load(r1)
     with open(f'{root_path}/pipdeptree.json', 'r') as r2:
         pipdeptree_data = json.load(r2)
+
+    # Read outer_commands.json for checking if code_edit was used
+    try:
+        with open(f'{root_path}/outer_commands.json', 'r') as r3:
+            outer_commands = json.load(r3)
+    except FileNotFoundError:
+        outer_commands = []  # Default to empty list if file doesn't exist
+
     diff_no = 1
     for command in commands_data:
         res = generate_statement(command, pipdeptree_data)
@@ -316,11 +332,12 @@ def integrate_dockerfile(root_path):
     
     # 组合最后的顺序
     dockerfile.append(base_image_st)
+    dockerfile.extend(proxy_config)
     dockerfile.append(workdir_st)
     if os.path.exists(f'{root_path}/patch'):
         dockerfile.append(copy_st)
 
-    if len(outer_command) > 0:
+    if len(outer_commands) > 0:
         dockerfile.append(copy_edit_st)
     dockerfile.extend(pre_download.splitlines())
     
@@ -329,6 +346,7 @@ def integrate_dockerfile(root_path):
     dockerfile.append(git_save_st)
     dockerfile.append(mv_st)
     dockerfile.append(rm_st)
+    dockerfile.append(checkout_st)
     dockerfile.extend(container_run_set)
     with open(f'{root_path}/Dockerfile', 'w') as w1:
         w1.write('\n'.join(dockerfile))
