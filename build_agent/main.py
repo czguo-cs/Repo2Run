@@ -376,10 +376,10 @@ def main():
     print("✓ Cleanup completed!")
 
 if __name__ == '__main__':
-    # try:
-    #     subprocess.run('docker rmi $(docker images --filter "dangling=true" -q) > /dev/null 2>&1', shell=True)
-    # except:
-    #     print("No dangling images")
+    try:
+        subprocess.run('docker rmi $(docker images --filter "dangling=true" -q) > /dev/null 2>&1', shell=True)
+    except:
+        print("No dangling images")
     start_time = time.time()
     main()
     end_time = time.time()
